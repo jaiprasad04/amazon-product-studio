@@ -16,10 +16,13 @@ export async function GET(req) {
     const { searchParams } = new URL(req.url);
     const requestId = searchParams.get("requestId");
 
+    const headerApiKey = req.headers.get("x-custom-api-key");
+    const customApiKey = headerApiKey || session.user.customApiKey || null;
+
     // If requestId is passed, perform status check/polling fallback
     if (requestId) {
       console.log(`[CREATIONS_API_GET] Checking status for requestId: ${requestId}`);
-      const statusData = await AIService.checkStatus(requestId, session.user.id);
+      const statusData = await AIService.checkStatus(requestId, session.user.id, customApiKey);
       console.log(`[CREATIONS_API_GET] Status result for ${requestId}:`, statusData);
       return NextResponse.json(statusData);
     }
@@ -35,7 +38,7 @@ export async function GET(req) {
       creations.map(async (c) => {
         if (c.status === "processing" && c.requestId) {
           try {
-            await AIService.checkStatus(c.requestId, session.user.id);
+            await AIService.checkStatus(c.requestId, session.user.id, customApiKey);
             const refetched = await prisma.amazonProductCreation.findUnique({
               where: { id: c.id }
             });
@@ -80,18 +83,25 @@ export async function POST(req) {
       return new NextResponse("Unauthorized", { status: 401 });
     }
 
-    // Check credits
-    const user = await prisma.user.findUnique({
-      where: { id: session.user.id },
-      select: { credits: true }
-    });
+    const body = await req.json();
+    const { inputUrls, prompt, aspectRatio } = body;
 
-    const cost = AIService.getCreditCost();
-    if (!user || user.credits < cost) {
-      return new NextResponse(`Insufficient credits. Required: ${cost}`, { status: 400 });
+    const headerApiKey = req.headers.get("x-custom-api-key");
+    const customApiKey = headerApiKey || body.customApiKey || session.user.customApiKey || null;
+    const isUsingCustomKey = Boolean(customApiKey && customApiKey.trim().length > 0);
+
+    // Check credits if not using custom API key
+    if (!isUsingCustomKey) {
+      const user = await prisma.user.findUnique({
+        where: { id: session.user.id },
+        select: { credits: true }
+      });
+
+      const cost = AIService.getCreditCost();
+      if (!user || user.credits < cost) {
+        return new NextResponse(`Insufficient credits. Required: ${cost}`, { status: 400 });
+      }
     }
-
-    const { inputUrls, prompt, aspectRatio } = await req.json();
 
     if (!Array.isArray(inputUrls) || inputUrls.length === 0) {
       return new NextResponse("Missing inputUrls array or empty", { status: 400 });
@@ -107,6 +117,7 @@ export async function POST(req) {
       inputUrls,
       prompt,
       aspectRatio: aspectRatio || "1:1",
+      customApiKey,
     });
 
     try {

@@ -16,7 +16,7 @@ export const AIService = {
   /**
    * Submit an image creation task to MuAPI with multiple reference images
    */
-  async generate(userId, { inputUrls = [], prompt, aspectRatio = "1:1" }) {
+  async generate(userId, { inputUrls = [], prompt, aspectRatio = "1:1", customApiKey = null }) {
     if (!Array.isArray(inputUrls) || inputUrls.length === 0) {
       throw new Error("At least one input image is required.");
     }
@@ -24,11 +24,15 @@ export const AIService = {
       throw new Error("Maximum of 14 input images allowed.");
     }
 
-    const cost = this.getCreditCost();
-    await UserService.deductCredits(userId, cost);
+    const isUsingCustomKey = Boolean(customApiKey && customApiKey.trim().length > 0);
+    const cost = isUsingCustomKey ? 0 : this.getCreditCost();
 
-    const apiKey = config.ai.apiKey;
-    if (!apiKey) throw new Error("MUAPIAPP_API_KEY is not configured");
+    if (!isUsingCustomKey && cost > 0) {
+      await UserService.deductCredits(userId, cost);
+    }
+
+    const apiKey = isUsingCustomKey ? customApiKey.trim() : config.ai.apiKey;
+    if (!apiKey) throw new Error("API Key is not configured");
 
     // Submit task
     const submitRes = await fetch(config.ai.submitEndpoint, {
@@ -50,14 +54,18 @@ export const AIService = {
 
     if (!submitRes.ok) {
       const errorText = await submitRes.text();
-      // Refund credits on failure before throwing
-      await UserService.addCredits(userId, cost);
+      // Refund credits on failure before throwing (if deducted)
+      if (!isUsingCustomKey && cost > 0) {
+        await UserService.addCredits(userId, cost);
+      }
       throw new Error(`API Submission Failed: ${submitRes.status} ${errorText}`);
     }
 
     const { request_id } = await submitRes.json();
     if (!request_id) {
-      await UserService.addCredits(userId, cost);
+      if (!isUsingCustomKey && cost > 0) {
+        await UserService.addCredits(userId, cost);
+      }
       throw new Error("No request_id received from API");
     }
 
@@ -123,8 +131,6 @@ export const AIService = {
           error: errorMsg,
         }
       });
-      // Refund credit on failure
-      await UserService.addCredits(creation.userId, this.getCreditCost());
       return { status: "failed", error: updated.error };
     }
 
@@ -134,13 +140,13 @@ export const AIService = {
   /**
    * Check status of generation (either from database or polling MuAPI API)
    */
-  async checkStatus(requestId, userId) {
+  async checkStatus(requestId, userId, customApiKey = null) {
     // First check if we already have it in DB
     const res = await this.processResult(requestId, {});
     if (res && res.status !== "processing") return res;
 
     // Fallback: poll MuAPI prediction result endpoint
-    const apiKey = config.ai.apiKey;
+    const apiKey = (customApiKey && customApiKey.trim().length > 0) ? customApiKey.trim() : config.ai.apiKey;
     if (!apiKey) throw new Error("API Key is not configured");
 
     try {
